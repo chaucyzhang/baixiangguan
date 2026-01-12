@@ -136,4 +136,31 @@ router.patch('/:productId', (req, res) => {   // 注意：这里用 product_id �
     });
 });
 
+router.delete('/:productId', (req, res) => {
+    const { productId } = req.params;
+
+    if (!productId) {
+        return res.status(400).json({ error: 'product_id 是必填参数' });
+    }
+
+    const sql = 'DELETE FROM orders WHERE product_id = ?';
+
+    db.run(sql, [productId], function(err) {
+        if (err) {
+            console.error('删除订单失败:', err);
+            return res.status(500).json({ error: '删除失败' });
+        }
+
+        if (this.changes === 0) {
+            return res.status(404).json({ error: '未找到该商品ID的订单' });
+        }
+
+        res.json({
+            message: '订单删除成功',
+            product_id: productId,
+            deleted: true
+        });
+    });
+});
+
 module.exports = router;
