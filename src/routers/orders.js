@@ -37,53 +37,103 @@ router.get('/:orderNo', (req, res) => {
 
 // 创建订单
 router.post('/', (req, res) => {
-    const { order_no, product_id, status = 'pending', address } = req.body;
+    const {
+        product_id,           // 唯一必填
+        order_no,             // 可选
+        tracking_number,      // 可选
+        status = 'pending',   // 默认值
+        buyer_name = '',      // 可选，默认空
+        buyer_phone = '',     // 可选，默认空
+        address = ''          // 可选，默认空
+    } = req.body;
 
-    if (!order_no || !product_id || !address) {
-        return res.status(400).json({ error: '缺少必要字段' });
+    if (!product_id) {
+        return res.status(400).json({ error: 'product_id 是必填字段（主键）' });
     }
 
     const sql = `
-    INSERT INTO orders (order_no, product_id, status, address)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO orders (
+      product_id, order_no, tracking_number, status, 
+      buyer_name, buyer_phone, address
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `;
 
-    db.run(sql, [order_no, product_id, status, address], function(err) {
+    db.run(sql, [
+        product_id,
+        order_no || null,         // 可为空
+        tracking_number || null,
+        status,
+        buyer_name,
+        buyer_phone,
+        address
+    ], function(err) {
         if (err) {
             if (err.message.includes('UNIQUE constraint')) {
-                return res.status(409).json({ error: '订单号已存在' });
+                if (err.message.includes('order_no')) {
+                    return res.status(409).json({ error: 'order_no 已存在' });
+                }
+                return res.status(409).json({ error: 'product_id 已存在' });
             }
             return res.status(500).json({ error: err.message });
         }
 
         res.status(201).json({
-            id: this.lastID,
-            order_no,
-            message: '订单创建成功'
+            product_id,
+            message: '订单创建成功（部分信息可后续补充）'
         });
     });
 });
-
 // 更新订单状态（最常用接口）
-router.patch('/:orderNo/status', (req, res) => {
-    const { orderNo } = req.params;
-    const { status } = req.body;
+router.patch('/:productId', (req, res) => {   // 注意：这里用 product_id 作为路径参数
+    const { productId } = req.params;
+    const updates = req.body;
 
-    const validStatuses = ['pending', 'paid', 'shipped', 'completed', 'cancelled'];
-    if (!status || !validStatuses.includes(status)) {
-        return res.status(400).json({ error: '无效的状态值' });
+    // 允许更新的字段（不包括 product_id，因为它是主键）
+    const allowedFields = [
+        'order_no',
+        'tracking_number',
+        'status',
+        'buyer_name',
+        'buyer_phone',
+        'address'
+    ];
+
+    const fieldsToUpdate = Object.keys(updates)
+        .filter(key => allowedFields.includes(key));
+
+    if (fieldsToUpdate.length === 0) {
+        return res.status(400).json({ error: '没有提供任何可更新字段' });
     }
 
-    db.run(
-        'UPDATE orders SET status = ? WHERE order_no = ?',
-        [status, orderNo],
-        function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            if (this.changes === 0) return res.status(404).json({ error: '订单不存在' });
+    // 构建动态 SQL
+    const setClause = fieldsToUpdate.map(key => `${key} = ?`).join(', ');
+    const values = fieldsToUpdate.map(key => updates[key]);
+    values.push(productId);
 
-            res.json({ message: '状态更新成功', order_no: orderNo, new_status: status });
+    const sql = `
+    UPDATE orders
+    SET ${setClause}
+    WHERE product_id = ?
+  `;
+
+    db.run(sql, values, function(err) {
+        if (err) {
+            if (err.message.includes('UNIQUE constraint') && err.message.includes('order_no')) {
+                return res.status(409).json({ error: 'order_no 已存在，无法使用' });
+            }
+            return res.status(500).json({ error: err.message });
         }
-    );
+
+        if (this.changes === 0) {
+            return res.status(404).json({ error: '订单不存在' });
+        }
+
+        res.json({
+            message: '订单信息更新成功',
+            product_id: productId,
+            updated_fields: fieldsToUpdate
+        });
+    });
 });
 
 module.exports = router;
