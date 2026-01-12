@@ -16,7 +16,7 @@ function initDatabase() {
     db.serialize(() => {
         // 先删除旧表（如果存在）→ 适合开发/测试环境
         // 注意：生产环境不要轻易执行 DROP TABLE，会丢失所有数据！
-        db.run("DROP TABLE IF EXISTS orders");
+        // db.run("DROP TABLE IF EXISTS orders");
 
         // 创建新表
         db.run(`
