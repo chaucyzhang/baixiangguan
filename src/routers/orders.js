@@ -37,51 +37,71 @@ router.get('/:orderNo', (req, res) => {
 
 // 创建订单
 router.post('/', (req, res) => {
-    const {
-        product_id,           // 唯一必填
-        order_no,             // 可选
-        tracking_number,      // 可选
-        status = 'pending',   // 默认值
-        buyer_name = '',      // 可选，默认空
-        buyer_phone = '',     // 可选，默认空
-        address = ''          // 可选，默认空
-    } = req.body;
+    const data = req.body;
 
-    if (!product_id) {
-        return res.status(400).json({ error: 'product_id 是必填字段（主键）' });
+    // 如果是数组 → 批量插入
+    if (Array.isArray(data)) {
+        const stmt = db.prepare(`
+      INSERT INTO orders (product_id, status, order_no, tracking_number, buyer_name, buyer_phone, address)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+        try {
+            db.transaction(() => {
+                data.forEach(item => {
+                    stmt.run(
+                        item.product_id,
+                        item.status || 'pending',
+                        item.order_no || null,
+                        item.tracking_number || null,
+                        item.buyer_name || '',
+                        item.buyer_phone || '',
+                        item.address || ''
+                    );
+                });
+            })();
+
+            res.status(201).json({
+                message: `成功批量插入 ${data.length} 条订单`,
+                count: data.length
+            });
+        } catch (err) {
+            console.error('批量插入失败:', err);
+            res.status(500).json({ error: '批量插入失败' });
+        } finally {
+            stmt.finalize();
+        }
     }
+    // 单条插入（原有逻辑）
+    else {
+        const {
+            product_id, order_no, status = 'pending', tracking_number,
+            buyer_name = '', buyer_phone = '', address = ''
+        } = data;
 
-    const sql = `
-    INSERT INTO orders (
-      product_id, order_no, tracking_number, status, 
-      buyer_name, buyer_phone, address
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `;
-
-    db.run(sql, [
-        product_id,
-        order_no || null,         // 可为空
-        tracking_number || null,
-        status,
-        buyer_name,
-        buyer_phone,
-        address
-    ], function(err) {
-        if (err) {
-            if (err.message.includes('UNIQUE constraint')) {
-                if (err.message.includes('order_no')) {
-                    return res.status(409).json({ error: 'order_no 已存在' });
-                }
-                return res.status(409).json({ error: 'product_id 已存在' });
-            }
-            return res.status(500).json({ error: err.message });
+        if (!product_id) {
+            return res.status(400).json({ error: 'product_id 是必填字段' });
         }
 
-        res.status(201).json({
-            product_id,
-            message: '订单创建成功（部分信息可后续补充）'
+        const sql = `
+      INSERT INTO orders (product_id, order_no, status, tracking_number, buyer_name, buyer_phone, address)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `;
+
+        db.run(sql, [product_id, order_no || null, status, tracking_number || null, buyer_name, buyer_phone, address], function(err) {
+            if (err) {
+                if (err.message.includes('UNIQUE constraint')) {
+                    return res.status(409).json({ error: 'product_id 已存在' });
+                }
+                return res.status(500).json({ error: err.message });
+            }
+
+            res.status(201).json({
+                product_id,
+                message: '订单创建成功'
+            });
         });
-    });
+    }
 });
 // 更新订单状态（最常用接口）
 router.patch('/:productId', (req, res) => {   // 注意：这里用 product_id 作为路径参数
