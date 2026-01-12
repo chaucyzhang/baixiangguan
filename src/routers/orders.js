@@ -3,6 +3,7 @@ const db = require('../db/database');
 const router = express.Router();
 
 // 获取所有订单（可加分页、筛选）
+// 获取所有订单（支持分页/筛选，可选）
 router.get('/', (req, res) => {
     const { status, page = 1, limit = 300 } = req.query;
     const offset = (page - 1) * limit;
@@ -15,172 +16,161 @@ router.get('/', (req, res) => {
         params.push(status);
     }
 
-    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    sql += ' ORDER BY product_id ASC LIMIT ? OFFSET ?';  // 按 product_id 升序
     params.push(Number(limit), offset);
 
-    db.all(sql, params, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    // 同步查询（better-sqlite3）
+    try {
+        const rows = db.prepare(sql).all(...params);
         res.json(rows);
-    });
+    } catch (err) {
+        console.error('查询失败:', err);
+        res.status(500).json({ error: '查询失败' });
+    }
 });
 
-// 获取单个订单
-router.get('/:orderNo', (req, res) => {
-    const { orderNo } = req.params;
+// 获取单个订单（按 product_id）
+router.get('/:productId', (req, res) => {
+    const { productId } = req.params;
 
-    db.get('SELECT * FROM orders WHERE order_no = ?', [orderNo], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!row) return res.status(404).json({ error: '订单不存在' });
+    try {
+        const row = db.prepare('SELECT * FROM orders WHERE product_id = ?').get(productId);
+        if (!row) {
+            return res.status(404).json({ error: '订单不存在' });
+        }
         res.json(row);
-    });
+    } catch (err) {
+        res.status(500).json({ error: '查询失败' });
+    }
 });
 
 // 创建订单
 router.post('/', (req, res) => {
-    const data = req.body;
+    let items = req.body;
 
-    // 如果是数组 → 批量插入
-    if (Array.isArray(data)) {
-        const stmt = db.prepare(`
-      INSERT INTO orders (product_id, status, order_no, tracking_number, buyer_name, buyer_phone, address)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-        try {
-            db.transaction(() => {
-                data.forEach(item => {
-                    stmt.run(
-                        item.product_id,
-                        item.status || 'pending',
-                        item.order_no || null,
-                        item.tracking_number || null,
-                        item.buyer_name || '',
-                        item.buyer_phone || '',
-                        item.address || ''
-                    );
-                });
-            })();
-
-            res.status(201).json({
-                message: `成功批量插入 ${data.length} 条订单`,
-                count: data.length
-            });
-        } catch (err) {
-            console.error('批量插入失败:', err);
-            res.status(500).json({ error: '批量插入失败' });
-        } finally {
-            stmt.finalize();
-        }
+    // 兼容单条：自动转数组
+    if (!Array.isArray(items)) {
+        items = [items];
     }
-    // 单条插入（原有逻辑）
-    else {
-        const {
-            product_id, order_no, status = 'pending', tracking_number,
-            buyer_name = '', buyer_phone = '', address = ''
-        } = data;
 
-        if (!product_id) {
-            return res.status(400).json({ error: 'product_id 是必填字段' });
-        }
+    if (items.length === 0) {
+        return res.status(400).json({ error: '没有提供数据' });
+    }
 
-        const sql = `
-      INSERT INTO orders (product_id, order_no, status, tracking_number, buyer_name, buyer_phone, address)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `;
+    const stmt = db.prepare(`
+    INSERT INTO orders (product_id, status, order_no, tracking_number, buyer_name, buyer_phone, address)
+    VALUES (@product_id, @status, @order_no, @tracking_number, @buyer_name, @buyer_phone, @address)
+  `);
 
-        db.run(sql, [product_id, order_no || null, status, tracking_number || null, buyer_name, buyer_phone, address], function(err) {
-            if (err) {
-                if (err.message.includes('UNIQUE constraint')) {
-                    return res.status(409).json({ error: 'product_id 已存在' });
-                }
-                return res.status(500).json({ error: err.message });
-            }
-
-            res.status(201).json({
-                product_id,
-                message: '订单创建成功'
+    try {
+        db.transaction(() => {
+            items.forEach(item => {
+                if (!item.product_id) throw new Error('缺少 product_id');
+                stmt.run({
+                    product_id: item.product_id,
+                    status: item.status || 'pending',
+                    order_no: item.order_no || null,
+                    tracking_number: item.tracking_number || null,
+                    buyer_name: item.buyer_name || '',
+                    buyer_phone: item.buyer_phone || '',
+                    address: item.address || ''
+                });
             });
+        })();
+
+        res.status(201).json({
+            message: `成功插入 ${items.length} 条订单`,
+            count: items.length
         });
+    } catch (err) {
+        console.error('插入失败:', err);
+        res.status(400).json({ error: err.message || '插入失败（可能 product_id 已存在）' });
     }
 });
 // 更新订单状态（最常用接口）
-router.patch('/:productId', (req, res) => {   // 注意：这里用 product_id 作为路径参数
-    const { productId } = req.params;
-    const updates = req.body;
+router.patch('/', (req, res) => {
+    let items = req.body;
 
-    // 允许更新的字段（不包括 product_id，因为它是主键）
-    const allowedFields = [
-        'order_no',
-        'tracking_number',
-        'status',
-        'buyer_name',
-        'buyer_phone',
-        'address'
-    ];
-
-    const fieldsToUpdate = Object.keys(updates)
-        .filter(key => allowedFields.includes(key));
-
-    if (fieldsToUpdate.length === 0) {
-        return res.status(400).json({ error: '没有提供任何可更新字段' });
+    // 如果不是数组，自动包装成数组（兼容单条）
+    if (!Array.isArray(items)) {
+        if (!items || !items.product_id) {
+            return res.status(400).json({ error: '缺少 product_id' });
+        }
+        items = [items];
     }
 
-    // 构建动态 SQL
-    const setClause = fieldsToUpdate.map(key => `${key} = ?`).join(', ');
-    const values = fieldsToUpdate.map(key => updates[key]);
-    values.push(productId);
+    // 批量校验 product_id 必须存在
+    for (const item of items) {
+        if (!item.product_id) {
+            return res.status(400).json({ error: '每条更新数据必须包含 product_id' });
+        }
+    }
 
-    const sql = `
-    UPDATE orders
-    SET ${setClause}
-    WHERE product_id = ?
-  `;
+    // 允许更新的字段
+    const allowedFields = [
+        'order_no', 'tracking_number', 'status', 'buyer_name', 'buyer_phone', 'address'
+    ];
 
-    db.run(sql, values, function(err) {
-        if (err) {
-            if (err.message.includes('UNIQUE constraint') && err.message.includes('order_no')) {
-                return res.status(409).json({ error: 'order_no 已存在，无法使用' });
+    let successCount = 0;
+    let failList = [];
+
+    try {
+        db.transaction(() => {
+            for (const updateData of items) {
+                const { product_id, ...updates } = updateData;
+
+                // 过滤允许字段
+                const fieldsToUpdate = Object.keys(updates)
+                    .filter(key => allowedFields.includes(key) && updates[key] !== undefined);
+
+                if (fieldsToUpdate.length === 0) {
+                    failList.push({ product_id, reason: '没有可更新字段' });
+                    continue;
+                }
+
+                const setClause = fieldsToUpdate.map(key => `${key} = ?`).join(', ');
+                const values = fieldsToUpdate.map(key => updates[key]);
+                values.push(product_id);
+
+                const sql = `UPDATE orders SET ${setClause} WHERE product_id = ?`;
+
+                const info = db.prepare(sql).run(...values);
+
+                if (info.changes === 0) {
+                    failList.push({ product_id, reason: '订单不存在' });
+                } else {
+                    successCount++;
+                }
             }
-            return res.status(500).json({ error: err.message });
-        }
-
-        if (this.changes === 0) {
-            return res.status(404).json({ error: '订单不存在' });
-        }
+        })();
 
         res.json({
-            message: '订单信息更新成功',
-            product_id: productId,
-            updated_fields: fieldsToUpdate
+            message: `更新完成：成功 ${successCount} 条，失败 ${failList.length} 条`,
+            successCount,
+            failCount: failList.length,
+            failures: failList
         });
-    });
+    } catch (err) {
+        console.error('批量更新失败:', err);
+        res.status(500).json({ error: '批量更新失败' });
+    }
 });
-
 router.delete('/:productId', (req, res) => {
     const { productId } = req.params;
 
-    if (!productId) {
-        return res.status(400).json({ error: 'product_id 是必填参数' });
-    }
-
-    const sql = 'DELETE FROM orders WHERE product_id = ?';
-
-    db.run(sql, [productId], function(err) {
-        if (err) {
-            console.error('删除订单失败:', err);
-            return res.status(500).json({ error: '删除失败' });
+    try {
+        const info = db.prepare('DELETE FROM orders WHERE product_id = ?').run(productId);
+        if (info.changes === 0) {
+            return res.status(404).json({ error: '订单不存在' });
         }
-
-        if (this.changes === 0) {
-            return res.status(404).json({ error: '未找到该商品ID的订单' });
-        }
-
         res.json({
-            message: '订单删除成功',
-            product_id: productId,
-            deleted: true
+            message: '删除成功',
+            product_id: productId
         });
-    });
+    } catch (err) {
+        console.error('删除失败:', err);
+        res.status(500).json({ error: '删除失败' });
+    }
 });
 
 module.exports = router;
