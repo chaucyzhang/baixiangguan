@@ -4,7 +4,7 @@ const router = express.Router();
 
 // 获取所有订单（可加分页、筛选）
 router.get('/', (req, res) => {
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status, page = 1, limit = 300 } = req.query;
     const offset = (page - 1) * limit;
 
     let sql = 'SELECT * FROM orders';
